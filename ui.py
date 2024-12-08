@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-from model import normalize_data, get_data, get_X_y, split_data, train_and_evaluate,predict,get_model, \
+from model import get_data, get_X_y, split_data, train_and_evaluate,predict,get_model, \
                 LSTM_Model, CNN_Model, LSTM_CNN_Model,rescale_data, \
                 Optimize_RandomsearchCV, Visualize,Optimize_GridsearchCV,Optimize_Bayesian,save_optimize_results, load_optimize_results
 import plotly.graph_objs as go
