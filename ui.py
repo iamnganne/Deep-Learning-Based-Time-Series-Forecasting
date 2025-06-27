@@ -1,15 +1,17 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-from model import get_data, get_X_y, split_data, train_and_evaluate,predict,get_model, \
-                LSTM_Model, CNN_Model, LSTM_CNN_Model,rescale_data, \
-                Optimize_RandomsearchCV, Visualize,Optimize_GridsearchCV,Optimize_Bayesian,save_optimize_results, load_optimize_results
+import optuna
+from model import normalize_data, get_data, get_X_y, split_data, train_and_evaluate, calculate_cvrmse, calculate_rmse, predict, \
+                LSTM_Model, CNN_Model, CNN_LSTM_Model, LSTM_CNN_Model,Optimize_Optuna,calculate_omega,combine_predictions_parallel,combine_predictions_mul,rescale_data,train_sequential_additive,train_sequential_multi, \
+                Optimize_RandomsearchCV, Visualize,Optimize_GridsearchCV,combine_predictions_add, save_optimize_results, load_optimize_results
 import plotly.graph_objs as go
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+
 from scipy.stats import randint
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 import time
 from skopt.space import Real, Integer,Categorical
+import matplotlib.pyplot as plt
 st.title('Dự báo chuỗi thời gian bằng mô hình lai ghép')
 st.info('This app builds a hybrid model')
 scaler = MinMaxScaler()
@@ -28,6 +30,7 @@ if "tested_model" not in st.session_state:
     st.session_state.tested_model = None
 if "mae" not in st.session_state:
     st.session_state.mae = None
+
 if "ts_model" not in st.session_state:
     st.session_state.ts_model = None
 if 'optimize_configs' not in st.session_state:
@@ -41,14 +44,16 @@ if 'Visualize' not in st.session_state:
     st.session_state.Visualize = Visualize
 if 'get_data' not in st.session_state:
     st.session_state.get_data = get_data
-if 'get_model' not in st.session_state:
-    st.session_state.get_model = get_model
 if 'get_X_y' not in st.session_state:
     st.session_state.get_X_y = get_X_y    
 if 'split_data' not in st.session_state:
     st.session_state.split_data = split_data    
 if 'train_and_evaluate' not in st.session_state:
     st.session_state.train_and_evaluate = train_and_evaluate
+if 'train_sequential_multi' not in st.session_state:
+    st.session_state.train_sequential_multi = train_sequential_multi
+if 'train_sequential_additive' not in st.session_state:
+    st.session_state.train_sequential_additive = train_sequential_additive
 if 'predict' not in st.session_state:
     st.session_state.predict = predict 
 if 'rescale_data' not in st.session_state:
@@ -57,12 +62,20 @@ if 'LSTM_Model' not in st.session_state:
     st.session_state.LSTM_Model = LSTM_Model 
 if 'CNN_Model' not in st.session_state:
     st.session_state.CNN_Model = CNN_Model
+if 'calculate_omega' not in st.session_state:
+    st.session_state.calculate_omega = calculate_omega
+if 'combine_predictions_parallel' not in st.session_state:
+    st.session_state.combine_predictions_parallel = combine_predictions_parallel    
 if 'Optimize_RandomsearchCV' not in st.session_state:
     st.session_state.Optimize_RandomsearchCV = Optimize_RandomsearchCV 
 if 'Optimize_GridsearchCV' not in st.session_state:
     st.session_state.Optimize_GridsearchCV = Optimize_GridsearchCV 
-if 'Optimize_Bayesian' not in st.session_state:
-    st.session_state.Optimize_Bayesian = Optimize_Bayesian 
+if 'Optimize_Optuna' not in st.session_state:
+    st.session_state.Optimize_Optuna = Optimize_Optuna 
+if 'combine_predictions_add' not in st.session_state:
+    st.session_state.combine_predictions_add = combine_predictions_add
+if 'combine_predictions_mul' not in st.session_state:
+    st.session_state.combine_predictions_mul = combine_predictions_mul
 if 'optimize_button_clicked' not in st.session_state:
     st.session_state.optimize_button_clicked = False
 if 'predict_button_clicked' not in st.session_state:
@@ -83,9 +96,13 @@ MODEL_AVAILABLE = {
 MODEL_TYPES = {
     "Mô hình đơn": "Mô hình đơn",
     "Mô hình tuần tự": "Mô hình tuần tự",
+    "Mô hình tuần tự cộng": "Mô hình tuần tự cộng",
+    "Mô hình tuần tự nhân": "Mô hình tuần tự nhân",
+    "Mô hình song song": "Mô hình song song"
 }
 MODEL_SEQUENTIAL = {
-    "Mô hình LSTM-CNN": "LSTM-CNN"
+    "Mô hình CNN-LSTM": "CNN-LSTM",
+    "Mô hình LSTM-CNN": "LSTM-CNN",
 }
 
 # Khởi tạo trạng thái mở của các expander trong session_state
@@ -97,7 +114,7 @@ if 'testing_expanded' not in st.session_state:
     st.session_state.testing_expanded = False
 
 with st.expander('Data'):
-    st.write('**Raw data**')
+    
     st.header("CHỌN FILE DỮ LIỆU ĐỂ KIỂM TRA MÔ HÌNH")
     
     uploaded_file = st.file_uploader("", type=['csv'])
@@ -150,7 +167,7 @@ with st.sidebar:
             model_chose1 = [model for model in MODEL_CHOSES.keys() if MODEL_CHOSES[model] != model_chose]
             combined_model = st.selectbox('Chọn mô hình kết hợp',model_chose1, key=f"combined_model_{model_type}" )
         
-    optimize_model = st.selectbox('Mô hình Optimize',('RandomizedSearchCV','GridSearchCV','Bayesian Optimization'))
+    optimize_model = st.selectbox('Mô hình Optimize',('RandomizedSearchCV','GridSearchCV','Optuna Optimization'))
     col1, col2 = st.columns(2)
     with col1:
         input_date = st.number_input("Chọn số ngày dùng dự đoán:", min_value=0, max_value=100, value=0, step=1)
@@ -185,9 +202,10 @@ with st.sidebar:
 
 
 # Optimize expander
-with st.expander("Optimize value", expanded=True):  # Luôn mở
+with st.expander("Optimize value", expanded=True): 
     if st.session_state.optimize_button_clicked:    
         with st.spinner('Đang tối ưu hóa mô hình...'):
+            start_train_time = time.time()
             # Định nghĩa tham số cho RandomizedSearchCV
             param_dist = {
                 'units': [32, 64, 128],
@@ -200,12 +218,6 @@ with st.expander("Optimize value", expanded=True):  # Luôn mở
                 'learning_rate': [0.0001, 0.001, 0.01],
                 'epochs': [10,20,30,40,50], 
                 'batch_size': [16, 32, 64, 128, 256]
-            }
-            param_space = {
-                'units': Integer(16, 256),  # Chọn số nguyên giữa 32 và 128
-                'learning_rate': Real(0.0001, 0.01),  # Tỷ lệ học từ 0.0001 đến 0.01
-                'epochs': Integer(10, 100),  # Epochs, từ 10 đến 50
-                'batch_size': Categorical([16, 32, 64, 128, 256])  # Chọn một trong các giá trị
             }
 
             # Xác định đúng tên mô hình để lưu kết quả
@@ -222,35 +234,25 @@ with st.expander("Optimize value", expanded=True):  # Luôn mở
                     val_ratio = val_size / 100
                 )
 
-                # Chọn hàm model phù hợp dựa trên lựa chọn người dùng
                 if model_type == "Mô hình tuần tự":
+                    if MODEL_SEQUENTIAL[model_chose] == "CNN-LSTM":
+                        model_fn = CNN_LSTM_Model
+                    else: 
                         model_fn = LSTM_CNN_Model
+
                 else:
                     if MODEL_CHOSES[model_chose] == "LSTM":
                         model_fn = LSTM_Model
                     elif MODEL_CHOSES[model_chose] == "CNN":
                         model_fn = CNN_Model
-
                 # Optimize model
                 if optimize_model == 'RandomizedSearchCV':
                     results, best_params = st.session_state.Optimize_RandomsearchCV(
                         build_fn=model_fn,
                         param_dist=param_dist,
                         X_val=X_val,
-                        y_val=y_val,
-                        input_dim=input_date,
-                        output_dim=output_date
+                        y_val=y_val
                     )
-                    
-                    # Lưu kết quả optimize
-                    filename = save_optimize_results(
-                        results, 
-                        best_params,
-                        model_name,  # Sử dụng model_name đã xác định
-                        'RandomizedSearchCV'
-                    )
-                    st.success(f"Đã lưu kết quả optimize vào {filename}")
-                    st.session_state.best_params = best_params
                 elif optimize_model == 'GridSearchCV':
                     results, best_params = st.session_state.Optimize_GridsearchCV(
                         build_fn=model_fn,
@@ -258,14 +260,25 @@ with st.expander("Optimize value", expanded=True):  # Luôn mở
                         X_val=X_val,
                         y_val=y_val
                     )
-                elif optimize_model == 'Bayesian Optimization':
-                    results, best_params = st.session_state.Optimize_Bayesian(
-                        build_fn=model_fn,
-                        param_space =param_space,
-                        X_val=X_val,
-                        y_val=y_val
-                    )
-                
+
+                elif optimize_model == "Optuna Optimization":
+                    if model_type == "Mô hình đơn":                    
+                        study = optuna.create_study(direction = "minimize")
+                        study.optimize(lambda trial: Optimize_Optuna(trial,X_train, y_train, X_val, y_val,
+                                                                    input_date,output_date, model_chose = MODEL_CHOSES.get(model_chose, model_chose)),
+                                                                    n_trials=50)
+                        best_params = study.best_params
+                        best_loss = study.best_value
+                        results = study.trials_dataframe()
+                    else: 
+                        study = optuna.create_study(direction = "minimize")
+                        study.optimize(lambda trial: Optimize_Optuna(trial,X_train, y_train, X_val, y_val,
+                                                                    input_date,output_date, model_chose = MODEL_SEQUENTIAL.get(model_chose, model_chose)),
+                                                                    n_trials=50)
+                        best_params = study.best_params
+                        best_loss = study.best_value
+                        results = study.trials_dataframe()
+
                 # Hiển thị kết quả tối ưu hóa sau khi hoàn thành
                 if results is not None and best_params is not None:
                     # Lưu kết quả optimize
@@ -275,51 +288,20 @@ with st.expander("Optimize value", expanded=True):  # Luôn mở
                         model_name, 
                         optimize_model
                     )
-                    #st.success(f"Đã lưu kết quả optimize vào {filename}")
-                    
-                    # Hiển thị kết quả như bình thường
+                    end_train_time = time.time()
+                    optimize_time = end_train_time - start_train_time
                     st.success("Tối ưu hóa hoàn tất!")
+                    st.write (f"Thời gian tối ưu hóa: {optimize_time}")
                             
                     # Hiển thị best parameters
                     st.subheader("Tham số tốt nhất:")
                     for param, value in best_params.items():
                         st.write(f"- {param}: {value}")
-                            
-                    # Hiển thị bảng kết quả chi tiết
-                    st.subheader("Kết quả chi tiết:")
-                    results_df = pd.DataFrame(results)
-                            
-                    # Chọn và hiển thị các cột quan trọng
-                    important_cols = ['mean_test_score', 'std_test_score', 'rank_test_score']
-                    if all(col in results_df.columns for col in important_cols):
-                        # results_df['mean_test_score'] = -results_df['mean_test_score']  # Convert back from negative MSE
-                        # results_df['RMSE'] = np.sqrt(results_df['mean_test_score'])
-                                
-                        # Sắp xếp theo rank
-                        # results_df = results_df.sort_values('rank_test_score')
-                                
-                        # Hiển thị top 15 kết quả
-                        st.write("Top 5 cấu hình tốt nhất:")
-                        display_cols = ['mean_test_score', 'std_test_score', 'rank_test_score'] + \
-                                        [col for col in results_df.columns if 'param_' in col]
-                        st.dataframe(results_df[display_cols].head(15))
-                    else:
-                        st.dataframe(results_df)
-                            
-                    # Lưu cấu hình tốt nhất vào session state
-                    st.session_state['optimize_configs'].append({
-                            'model_type': model_chose,
-                            'best_params': best_params,
-                            'best_score': float(results_df.loc[results_df['rank_test_score'] == 1, 'mean_test_score'].iloc[0])
-                        })
-                            
-                    # Hiển thị lịch sử tối ưu
-                    if len(st.session_state['optimize_configs']) > 0:
-                        st.subheader("Lịch sử tối ưu hóa:")
-                        history_df = pd.DataFrame(st.session_state['optimize_configs'])
-                        st.dataframe(history_df)
 
-                    # Lưu tham số tốt nhất vào session_state
+                    st.session_state['optimize_configs'].append({
+                        'model_type': model_chose,
+                        'best_params': best_params}
+                    )        
                     st.session_state.best_params = best_params
                     st.session_state.optimize_button_clicked = False 
                 else:
@@ -359,6 +341,19 @@ with st.expander("Training Model", expanded=True):  # Luôn mở
                     model_name, 
                     optimize_model
                 )
+            elif model_type in ["Mô hình tuần tự cộng", "Mô hình tuần tự nhân", "Mô hình song song"]:
+                model_name = MODEL_CHOSES[model_chose]
+                model_name1 = MODEL_CHOSES[combined_model]
+                
+                # Load tối ưu hóa cho mô hình đầu tiên
+                saved_results, saved_params = load_optimize_results(
+                    model_name, optimize_model
+                )
+                # Load tối ưu hóa cho mô hình thứ hai
+                saved_results_1, saved_params_1 = load_optimize_results(
+                    model_name1, optimize_model
+                )
+
             else:
                 model_name = MODEL_CHOSES[model_chose]
                 saved_results, saved_params = load_optimize_results(
@@ -382,17 +377,26 @@ with st.expander("Training Model", expanded=True):  # Luôn mở
                     
                     # Hiển thị tham số tối ưu được sử dụng
 
-                    st.subheader("Tham số tối ưu cho quá trình huấn luyện:")
-                    for param, value in saved_params.items():
-                        st.write(f"- {param}: {value}")
+                    # st.subheader(f"Tham số tối ưu cho quá trình huấn luyện - {model_name}:")
+                    # for param, value in saved_params.items():
+                    #     st.write(f"- {param}: {value}")
+                    # if model_type in [ "Mô hình song song"]:
+                    #     # Kiểm tra sự tồn tại của tham số tối ưu cho mô hình thứ hai
+                    #     if saved_params_1:
+                    #         st.subheader(f"Tham số tối ưu cho quá trình huấn luyện - {model_name1}:")
+                    #         for param, value in saved_params_1.items():
+                    #             st.write(f"- {param}: {value}")
+                    #     else:
+                    #         st.warning("Không tìm thấy tham số tối ưu cho mô hình thứ hai!")
                     # Train và lưu history
                     # Truyền trực tiếp tên mô hình từ MODEL_SEQUENTIAL hoặc MODEL_CHOSES
-                    model_instance = get_model(model_name, input_date, output_date, saved_params.get('learning_rate', 0.001))
                     if model_type == "Mô hình đơn" or model_type == "Mô hình tuần tự":
                         model, history = train_and_evaluate(
                             X_train, y_train,
                             X_val, y_val,
-                            model=model_instance,  # Truyền trực tiếp tên mô hình
+                            input_dim = input_date,
+                            output_dim = output_date,
+                            model_chose=model_name,  # Truyền trực tiếp tên mô hình
                             epochs=saved_params.get('epochs', 50),
                             batch_size=saved_params.get('batch_size', 32),
                             learning_rate=saved_params.get('learning_rate', 0.001),
@@ -420,6 +424,135 @@ with st.expander("Training Model", expanded=True):  # Luôn mở
                         
                         # Save model to session state
                         st.session_state.trained_model = model
+                    elif model_type == "Mô hình song song":
+                        model, history = st.session_state.train_and_evaluate(
+                                            X_train, y_train,
+                                            X_val, y_val,
+                                            input_dim = input_date,
+                                            output_dim = output_date,
+                                            model_chose=model_name,  # Mô hình đầu tiên
+                                            epochs=saved_params.get('epochs', 50),
+                                            batch_size=saved_params.get('batch_size', 32),
+                                            learning_rate=saved_params.get('learning_rate', 0.001),
+                                            return_history=True
+                                            )
+                        model1, history1 = st.session_state.train_and_evaluate(
+                                            X_train, y_train,
+                                            X_val, y_val,
+                                            input_dim = input_date,
+                                            output_dim = output_date,
+                                            model_chose=model_name1,  # Mô hình thứ hai
+                                            epochs=saved_params_1.get('epochs', 50),
+                                            batch_size=saved_params_1.get('batch_size', 32),
+                                            learning_rate=saved_params_1.get('learning_rate', 0.001),
+                                            return_history=True
+                                            )
+                        end_train_time = time.time()
+                        train_time = end_train_time - start_train_time
+                        
+                        # Vẽ biểu đồ loss/accuracy
+                        fig_metrics = go.Figure()
+                        fig_metrics.add_trace(go.Scatter(y=history.history['loss'], name=f'Train Loss {model_name}'))
+                        fig_metrics.add_trace(go.Scatter(y=history1.history['loss'], name=f'Train Loss {model_name1} '))
+                        fig_metrics.add_trace(go.Scatter(y=history.history['val_loss'], name=f'Validation Loss {model_name}'))
+                        fig_metrics.add_trace(go.Scatter(y=history1.history['val_loss'], name=f'Validation Loss {model_name1}'))
+                        fig_metrics.update_layout(title='Loss theo epoch',
+                                            xaxis_title='Epoch',
+                                            yaxis_title='Loss')
+                        st.plotly_chart(fig_metrics)
+                        
+                        # Hiển thị kết quả cuối cùng
+                        st.subheader("Kết quả huấn luyện:")
+                        st.write(f"- Thời gian huấn luyện: {train_time:.2f} giây")
+                        st.write(f"- Số epoch hoàn thành: {saved_params['epochs']}")
+                        st.write(f"- Final Loss: {history.history['loss'][-1]:.4f}")
+                        st.write(f"- Final Validation Loss: {history.history['val_loss'][-1]:.4f}")
+                        
+                        # Save model to session state
+                        st.session_state.trained_model = model
+                        st.session_state.trained_model1 = model1
+
+                    elif model_type == "Mô hình tuần tự cộng":
+                        model1, model2, history1, history2 = st.session_state.train_sequential_additive(
+                                            X_train, y_train,
+                                            X_val, y_val,
+                                            input_dim = input_date,
+                                            output_dim = output_date,
+                                            first_model_name=model_name,
+                                            second_model_name = model_name1, # Mô hình đầu tiên
+                                            epochs=saved_params.get('epochs', 50),
+                                            batch_size=saved_params.get('batch_size', 32),
+                                            learning_rate=saved_params.get('learning_rate', 0.001),
+                                            return_history=True
+                                            )
+                        
+                        end_train_time = time.time()
+                        train_time = end_train_time - start_train_time
+                        
+                        # Vẽ biểu đồ loss/accuracy
+                        fig_metrics = go.Figure()
+                        fig_metrics.add_trace(go.Scatter(y=history1.history['loss'], name=f'Train Loss {model_name}'))
+                        fig_metrics.add_trace(go.Scatter(y=history2.history['loss'], name=f'Train Loss {model_name1} '))
+                        fig_metrics.add_trace(go.Scatter(y=history1.history['val_loss'], name=f'Validation Loss {model_name}'))
+                        fig_metrics.add_trace(go.Scatter(y=history2.history['val_loss'], name=f'Validation Loss {model_name1}'))
+
+                        fig_metrics.update_layout(title='Loss theo epoch',
+                                            xaxis_title='Epoch',
+                                            yaxis_title='Loss')
+                        st.plotly_chart(fig_metrics)
+                        
+                        # Hiển thị kết quả cuối cùng
+                        st.subheader("Kết quả huấn luyện:")
+                        st.write(f"- Thời gian huấn luyện: {train_time:.2f} giây")
+                        st.write(f"- Số epoch hoàn thành: {saved_params['epochs']}")
+                        st.write(f"- Final Loss mô hình {model_name}: {history1.history['loss'][-1]:.4f}")
+                        st.write(f"- Final Validation Loss mô hình {model_name}: {history1.history['val_loss'][-1]:.4f}")
+                        st.write(f"- Final Loss mô hình {model_name1}: {history2.history['loss'][-1]:.4f}")
+                        st.write(f"- Final Validation Loss mô hình {model_name1}: {history2.history['val_loss'][-1]:.4f}")
+
+                        st.session_state.trained_model = model1
+                        st.session_state.trained_model1 = model2
+                    elif model_type == "Mô hình tuần tự nhân":
+                        model1, model2, history1, history2 = st.session_state.train_sequential_multi(
+                                            X_train, y_train,
+                                            X_val, y_val,
+                                            input_dim = input_date,
+                                            output_dim = output_date,
+                                            first_model_name=model_name,
+                                            second_model_name = model_name1, # Mô hình đầu tiên
+                                            epochs=saved_params.get('epochs', 50),
+                                            batch_size=saved_params.get('batch_size', 32),
+                                            learning_rate=saved_params.get('learning_rate', 0.001),
+                                            return_history=True
+                                            )
+                        
+                        end_train_time = time.time()
+                        train_time = end_train_time - start_train_time
+                        
+                        # Vẽ biểu đồ loss/accuracy
+                        fig_metrics = go.Figure()
+                        fig_metrics.add_trace(go.Scatter(y=history1.history['loss'], name=f'Train Loss {model_name}'))
+                        fig_metrics.add_trace(go.Scatter(y=history2.history['loss'], name=f'Train Loss {model_name1} '))
+                        fig_metrics.add_trace(go.Scatter(y=history1.history['val_loss'], name=f'Validation Loss {model_name}'))
+                        fig_metrics.add_trace(go.Scatter(y=history2.history['val_loss'], name=f'Validation Loss {model_name1}'))
+
+                        fig_metrics.update_layout(title='Loss theo epoch',
+                                            xaxis_title='Epoch',
+                                            yaxis_title='Loss')
+                        st.plotly_chart(fig_metrics)
+                        
+                        # Hiển thị kết quả cuối cùng
+                        st.subheader("Kết quả huấn luyện:")
+                        st.write(f"- Thời gian huấn luyện: {train_time:.2f} giây")
+                        st.write(f"- Số epoch hoàn thành: {saved_params['epochs']}")
+                        st.write(f"- Final Loss mô hình {model_name}: {history1.history['loss'][-1]:.4f}")
+                        st.write(f"- Final Validation Loss mô hình {model_name}: {history1.history['val_loss'][-1]:.4f}")
+                        st.write(f"- Final Loss mô hình {model_name1}: {history2.history['loss'][-1]:.4f}")
+                        st.write(f"- Final Validation Loss mô hình {model_name1}: {history2.history['val_loss'][-1]:.4f}")
+
+                        st.session_state.trained_model = model1
+                        st.session_state.trained_model1 = model2
+                        
             else:
                 st.error("Không tìm thấy tham số tối ưu đã lưu. Vui lòng chạy optimize trước.")
                     
@@ -437,13 +570,13 @@ with st.expander("Testing Model", expanded=True):  # Luôn mở
             st.write(f"- {param}: {value}")
     
     # Hiển thị kết quả training nếu có
-    if hasattr(st.session_state, 'training_results'):
-        st.subheader("Kết quả training:")
-        tr = st.session_state.training_results
-        st.write(f"- Thời gian huấn luyện: {tr['train_time']:.2f} giây")
-        st.write(f"- Số epoch: {tr['epochs']}")
-        st.write(f"- Loss cuối cùng: {tr['final_loss']:.4f}")
-        st.write(f"- Validation Loss cuối cùng: {tr['final_val_loss']:.4f}")
+    # if hasattr(st.session_state, 'training_results'):
+    #     st.subheader("Kết quả training:")
+    #     tr = st.session_state.training_results
+    #     st.write(f"- Thời gian huấn luyện: {tr['train_time']:.2f} giây")
+    #     st.write(f"- Số epoch: {tr['epochs']}")
+    #     st.write(f"- Loss cuối cùng: {tr['final_loss']:.4f}")
+    #     st.write(f"- Validation Loss cuối cùng: {tr['final_val_loss']:.4f}")
     
     if st.session_state.testing_button_clicked:
         try:
@@ -464,7 +597,7 @@ with st.expander("Testing Model", expanded=True):  # Luôn mở
                     # Dự đoán và tính các metrics
                         start_test_time = time.time()
                         model = st.session_state.trained_model
-                        predictions, actual_test, mae, mse, rmse, mape, buf = st.session_state.predict(model, X_test, y_test)
+                        predictions, actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict(model, X_test, y_test)
                         end_test_time = time.time()
                         test_time = end_test_time - start_test_time
                         st.write (f'Testing time: {test_time:.2f}s ')
@@ -477,12 +610,12 @@ with st.expander("Testing Model", expanded=True):  # Luôn mở
                         with metrics_cols[2]:
                             st.metric("RMSE", f"{rmse:.6f}")
                         with metrics_cols[3]:
-                            st.metric("MAPE", f"{mape:.4f}%")
+                            st.metric("CV_RMSE", f"{cv_rmse:.4f}%")
                             
                     elif model_type == "Mô hình tuần tự":
                         start_test_time = time.time()
                         model = st.session_state.trained_model
-                        predictions, actual_test, mae, mse, rmse, mape, buf = st.session_state.predict(model,X_test, y_test)
+                        predictions, actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict(model,X_test, y_test)
                         end_test_time = time.time()
                         test_time = end_test_time - start_test_time
                         st.write (f'Testing time: {test_time:.2f}s ')
@@ -495,9 +628,73 @@ with st.expander("Testing Model", expanded=True):  # Luôn mở
                         with metrics_cols[2]:
                             st.metric("RMSE", f"{rmse:.6f}")
                         with metrics_cols[3]:
-                            st.metric("MAPE", f"{mape:.4f}%")
+                            st.metric("CV_RMSE", f"{cv_rmse:.4f}%")
+                    elif model_type == "Mô hình song song":
+                        start_test_time = time.time()
+                        model = st.session_state.trained_model
+                        model1 = st.session_state.trained_model1
+                        predictions,actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict (model,X_test, y_test)
+                        predictions1,actual_test1, mae1, mse1, rmse1, cv_rmse1, buf1 = st.session_state.predict(model1,X_test, y_test)
+                        final_predict,mae, mse, rmse, cv_rmse, buf = combine_predictions_parallel(predictions,predictions1,actual_test, input_dim = input_date, output_dim = output_date)
+                    # Hiển thị metrics
+                        end_test_time = time.time()
+                        test_time = end_test_time - start_test_time
+                        st.write (f'Testing time: {test_time:.2f}s ')
+                        st.subheader("Các chỉ số đánh giá:")
+                        metrics_cols = st.columns(4)
+                        with metrics_cols[0]:
+                            st.metric("MAE", f"{mae:.6f}")
+                        with metrics_cols[1]:
+                            st.metric("MSE", f"{mse:.6f}")
+                        with metrics_cols[2]:
+                            st.metric("RMSE", f"{rmse:.6f}")
+                        with metrics_cols[3]:
+                            st.metric("CV_RMSE", f"{cv_rmse:.4f}%")
+
+                    elif model_type == "Mô hình tuần tự nhân":
+                        start_test_time = time.time()
+                        model = st.session_state.trained_model
+                        model1 = st.session_state.trained_model1
+                        predictions,actual_test, mae, mse, rmse, cv_rmse, buf = predict(model,X_test, y_test)
+                        predictions1,actual_test1, mae1, mse1, rmse1, cv_rmse1, buf1 = predict(model1,X_test, y_test)
+                        final_predict,mae, mse, rmse, cv_rmse, buf = combine_predictions_mul(predictions,predictions1,actual_test)
+                        end_test_time = time.time()
+                        test_time = end_test_time - start_test_time
+                        st.write (f'Testing time: {test_time:.2f}s ')
+                        st.subheader("Các chỉ số đánh giá:")
+                        metrics_cols = st.columns(4)
+                        with metrics_cols[0]:
+                            st.metric("MAE", f"{mae:.6f}")
+                        with metrics_cols[1]:
+                            st.metric("MSE", f"{mse:.6f}")
+                        with metrics_cols[2]:
+                            st.metric("RMSE", f"{rmse:.6f}")
+                        with metrics_cols[3]:
+                            st.metric("CV_RMSE", f"{cv_rmse:.4f}%")
+
+                    elif model_type == "Mô hình tuần tự cộng":
+                        start_test_time = time.time()
+                        model = st.session_state.trained_model
+                        model1 = st.session_state.trained_model1
+                        predictions,actual_test, mae, mse, rmse, cv_rmse, buf = predict(model,X_test, y_test)
+                        predictions1,actual_test1, mae1, mse1, rmse1, cv_rmse1, buf1 = predict(model1,X_test, y_test)
+                        final_predict,mae, mse, rmse, cv_rmse, buf = combine_predictions_add(predictions,predictions1,actual_test)
+                        end_test_time = time.time()
+                        test_time = end_test_time - start_test_time
+                        st.write (f'Testing time: {test_time:.2f}s ')
+                        st.subheader("Các chỉ số đánh giá:")
+                        metrics_cols = st.columns(4)
+                        with metrics_cols[0]:
+                            st.metric("MAE", f"{mae:.6f}")
+                        with metrics_cols[1]:
+                            st.metric("MSE", f"{mse:.6f}")
+                        with metrics_cols[2]:
+                            st.metric("RMSE", f"{rmse:.6f}")
+                        with metrics_cols[3]:
+                            st.metric("CV_RMSE", f"{cv_rmse:.4f}%")
+                        st.success("Đánh giá mô hình hoàn tất!")
                     else: 
-                        st.success("Khong the danh gia mo hinh")
+                        st.success("Không thể đánh giá mô hình")
             
             else:
                 st.error("Vui lòng huấn luyện mô hình trước khi testing!")
@@ -514,113 +711,58 @@ with st.expander("Predict Actual Value"):
         try:
             if st.session_state.trained_model is not None:
                 with st.spinner('Đang dự đoán...'):
-                    # Lấy dữ liệu test từ session state
                     data = st.session_state.data
                     target_column = st.session_state.target_column
                     X, y = st.session_state.get_data(data,input_dim = input_date, output_dim = output_date, target_column=target_column)
                     X_train, X_val, X_test, y_train, y_val, y_test = st.session_state.split_data(
                         X, y, 
-                        # train_ratio=actual_train_size,
-                        # test_ratio=test_size
-                        test_ratio=test_size/100,  # Chuyển đổi từ phần trăm sang tỷ lệ
+                        test_ratio=test_size/100,
                         val_ratio=val_size/100
                     )
-                    
-                    # Thực hiện dự đoán
+
                     if model_type == "Mô hình đơn":
                         model = st.session_state.trained_model
-                        predictions, actual_test, mae, mse, rmse, mape, buf = st.session_state.predict(
+                        predictions, actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict(
                             model, 
                             X_test, 
                             y_test
                         )
-                        st.image(buf, caption="Biểu đồ dự đoán", use_column_width=True)
-                       # Lấy cột ngày và đảm bảo sắp xếp theo thứ tự tăng dần (nếu cần)
-                        date_column = data.columns[0]  # Tên cột ngày
-                        data[date_column] = pd.to_datetime(data[date_column], errors='coerce')  # Chuyển sang định dạng datetime
-                        data = data.sort_values(by=date_column, ascending=True).reset_index(drop=True)  # Sắp xếp tăng dần
+                        st.image(buf, caption="Biểu đồ dự đoán", use_container_width=True)
 
-                        # Lấy từ dưới lên
-                        data_reversed = data.iloc[::-1].reset_index(drop=False)  # Đảo ngược dữ liệu
-
-                        # Lấy số ngày tương ứng với actual_test
-                        dates = data_reversed[date_column].iloc[:len(actual_test)] 
-                        # Tạo DataFrame cho bảng so sánh
-                        comparison_data = []
-                        for i in range(predictions.shape[1]):  # Lặp qua từng output_dim
-                            comparison_data.append({
-                                'Date': dates.values,
-                                'Actual': data[target_column].iloc[-len(actual_test):].values,  # Giá trị thực tế
-                                    'Predicted': data[target_column].iloc[-len(predictions):].values * (predictions.flatten() / actual_test.flatten()), # Giá trị dự đoán
-                                'MSE': (actual_test[:, i] - predictions[:, i]) ** 2  # MSE từng điểm
-                            })
-
-                        # Tạo DataFrame tổng hợp
-                        comparison_df = pd.DataFrame(comparison_data[0])  # Lấy cột đầu tiên
-                        for i in range(1, predictions.shape[1]):  # Thêm các cột khác (nếu có nhiều output_dim)
-                            comparison_df[f'Actual_{i+1}'] = comparison_data[i]['Actual']
-                            comparison_df[f'Predicted_{i+1}'] = comparison_data[i]['Predicted']
-                            comparison_df[f'MSE_{i+1}'] = comparison_data[i]['MSE']
-                        
-                        # Sắp xếp dữ liệu theo ngày giảm dần
-                        comparison_df = comparison_df.sort_values('Date', ascending=False)
-
-                        # Hiển thị bảng với định dạng và độ rộng tùy chỉnh
-                        st.write("Bảng so sánh giá trị thực tế và dự đoán:")
-                        st.dataframe(
-                            comparison_df.style.format({
-                                'Date': '{}',
-                                'Actual': '{:.1f}',
-                                'Predicted': '{:.1f}',
-                                'MSE': '{:.6f}'  # Giảm số chữ số thập phân của MSE
-                            }),
-                            width=1000  # Tăng độ rộng của bảng
-                        )
                     elif model_type == "Mô hình tuần tự":
                         model = st.session_state.trained_model
-                        predictions, actual_test, mae, mse, rmse, mape, buf = st.session_state.predict(model,X_test, y_test)
-                        st.image(buf, caption="Biểu đồ dự đoán", use_column_width=True)
-                        #Lấy cột ngày và đảm bảo sắp xếp theo thứ tự tăng dần (nếu cần)
-                        date_column = data.columns[0]  # Tên cột ngày
-                        data[date_column] = pd.to_datetime(data[date_column], errors='coerce')  # Chuyển sang định dạng datetime
-                        data = data.sort_values(by=date_column, ascending=True).reset_index(drop=True)  # Sắp xếp tăng dần
+                        predictions, actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict(model,X_test, y_test)
+                        st.image(buf, caption="Biểu đồ dự đoán", use_container_width=True)
+                    elif model_type == "Mô hình song song":
+                        model = st.session_state.trained_model
+                        model1 = st.session_state.trained_model1
+                        predictions,actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict (model,X_test, y_test)
+                        predictions1,actual_test1, mae1, mse1, rmse1, cv_rmse1, buf1 = st.session_state.predict(model1,X_test, y_test)
 
-                        # Lấy từ dưới lên
-                        data_reversed = data.iloc[::-1].reset_index(drop=False)  # Đảo ngược dữ liệu
+                        final_predict,mae, mse, rmse, cv_rmse, buf_final = combine_predictions_parallel(predictions,predictions1,actual_test, input_dim = input_date, output_dim = output_date)
+                        final_predict_scale,actual_test_scale = rescale_data(final_predict, actual_test)
+                        st.image(buf_final, caption="Biểu đồ dự đoán", use_container_width=True)
 
-                        # Lấy số ngày tương ứng với actual_test
-                        dates = data_reversed[date_column].iloc[:len(actual_test)] 
-                        # Tạo DataFrame cho bảng so sánh
-                        comparison_data = []
-                        for i in range(predictions.shape[1]):  # Lặp qua từng output_dim
-                            comparison_data.append({
-                                'Date': dates.values,
-                                'Actual': data[target_column].iloc[-len(actual_test):].values,  # Giá trị thực tế
-                                    'Predicted': data[target_column].iloc[-len(predictions):].values * (predictions.flatten() / actual_test.flatten()), # Giá trị dự đoán
-                                'MSE': (actual_test[:, i] - predictions[:, i]) ** 2  # MSE từng điểm
-                            })
+                    elif model_type == "Mô hình tuần tự nhân":
+                        model = st.session_state.trained_model
+                        model1 = st.session_state.trained_model1
+                        predictions,actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict (model,X_test, y_test)
+                        predictions1,actual_test1, mae1, mse1, rmse1, cv_rmse1, buf1 = st.session_state.predict(model1,X_test, y_test)
 
-                        # Tạo DataFrame tổng hợp
-                        comparison_df = pd.DataFrame(comparison_data[0])  # Lấy cột đầu tiên
-                        for i in range(1, predictions.shape[1]):  # Thêm các cột khác (nếu có nhiều output_dim)
-                            comparison_df[f'Actual_{i+1}'] = comparison_data[i]['Actual']
-                            comparison_df[f'Predicted_{i+1}'] = comparison_data[i]['Predicted']
-                            comparison_df[f'MSE_{i+1}'] = comparison_data[i]['MSE']
-                        
-                        # Sắp xếp dữ liệu theo ngày giảm dần
-                        comparison_df = comparison_df.sort_values('Date', ascending=False)
+                        final_predict,mae, mse, rmse, cv_rmse, buf = combine_predictions_mul(predictions,predictions1,actual_test)
+                        final_predict_scale,actual_test_scale = rescale_data(final_predict, actual_test)
+                        st.image(buf, caption="Biểu đồ dự đoán", use_container_width=True)
 
-                        # Hiển thị bảng với định dạng và độ rộng tùy chỉnh
-                        st.write("Bảng so sánh giá trị thực tế và dự đoán:")
-                        st.dataframe(
-                            comparison_df.style.format({
-                                'Date': '{}',
-                                'Actual': '{:.1f}',
-                                'Predicted': '{:.1f}',
-                                'MSE': '{:.6f}'  # Giảm số chữ số thập phân của MSE
-                            }),
-                            width=1000  # Tăng độ rộng của bảng
-                        )
+                    elif model_type == "Mô hình tuần tự cộng":
+                        model = st.session_state.trained_model
+                        model1 = st.session_state.trained_model1
+                        predictions,actual_test, mae, mse, rmse, cv_rmse, buf = st.session_state.predict (model,X_test, y_test)
+                        predictions1,actual_test1, mae1, mse1, rmse1, cv_rmse1, buf1 = st.session_state.predict(model1,X_test, y_test)
+
+                        final_predict,mae, mse, rmse, cv_rmse, buf = combine_predictions_mul(predictions,predictions1,actual_test)
+                        final_predict_scale,actual_test_scale = rescale_data(final_predict, actual_test)
+                        st.image(buf, caption="Biểu đồ dự đoán", use_container_width=True)
+
             else:
                 st.error("Vui lòng huấn luyện mô hình trước khi d đoán!")
                 
