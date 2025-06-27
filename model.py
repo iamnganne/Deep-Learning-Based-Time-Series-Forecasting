@@ -27,44 +27,40 @@ from tensorflow.keras.layers import (
     Dense, LSTM, Conv1D, MaxPooling1D, Flatten, 
     Dropout, BatchNormalization, GlobalAveragePooling1D
 )
-# Khai báo các biến ngoài class
-data = None  # hoặc gán dữ liệu của bạn vào đây
-window_size = None  # Gán giá trị của window_size (ví dụ: 7)
+
+data = None 
+window_size = None  
 scaler = MinMaxScaler() 
 def normalize_data(X_value, y_value):
     X_scaler = MinMaxScaler()
     y_scaler = MinMaxScaler()
-
-        # Huấn luyện scaler và chuẩn hóa dữ liệu
     X_scale_dataset = X_scaler.fit_transform(X_value)
     y_scale_dataset = y_scaler.fit_transform(y_value)
-
     return X_scale_dataset, y_scale_dataset
 
 def get_data(data,input_dim, output_dim,target_column=None):
-        # Chuẩn bị dữ liệu
     if data is not None:
         data = data.copy()
             
-            # Chuyển đổi cột thời gian
-        date_column = data.columns[0]  # Giả định cột đầu tiên là thời gian
+        #change date/time
+        date_column = data.columns[0] 
         data[date_column] = pd.to_datetime(data[date_column], format='%m/%d/%Y', errors='coerce')
         data = data.sort_values(by=[date_column], ascending=True)
         data.set_index(date_column, inplace=True)
-        
+
             # Xử lý dữ liệu số
         numeric_columns = data.select_dtypes(include=[np.number]).columns
         for column in numeric_columns:
             data[column] = pd.to_numeric(data[column].astype(str).str.replace(',', ''), errors='coerce')
             
-            # Chọn cột mục tiêu
+        #choose target column
         if target_column is None:
-            target_column = numeric_columns[0]  # Sử dụng cột số đầu tiên nếu không chỉ định
+            target_column = numeric_columns[0] 
             
         X_value = data[[target_column]]
         y_value = data[[target_column]]
             
-            # Xử lý missing values
+            # missing values
         X_value = X_value.fillna(method='ffill').fillna(method='bfill')
         y_value = y_value.fillna(method='ffill').fillna(method='bfill')
             
@@ -75,14 +71,15 @@ def get_data(data,input_dim, output_dim,target_column=None):
         X, y = get_X_y(X_scale_dataset, y_scale_dataset, input_dim, output_dim)
         print(f"X shape: {X.shape}, y shape: {y.shape}") 
         return X,y  
+    
 def get_X_y(X_data, y_data, input_dim, output_dim):
     X = []
     y = []     
     length = len(X_data)
 
-    for i in range(length - input_dim - output_dim + 1):  # Đảm bảo không vượt quá chiều dài
+    for i in range(length - input_dim - output_dim + 1): 
         X_value = X_data[i: i + input_dim][:, :]
-        y_value = y_data[i + input_dim: i + (input_dim + output_dim)][:, 0] # Flatten để giảm chiều cho y
+        y_value = y_data[i + input_dim: i + (input_dim + output_dim)][:, 0] 
         if len(X_value) == input_dim and len(y_value) == output_dim:
             X.append(X_value)
             y.append(y_value)
@@ -90,11 +87,10 @@ def get_X_y(X_data, y_data, input_dim, output_dim):
     return np.array(X), np.array(y)
 
 def split_data (X,y,test_ratio=0.2, val_ratio=0.2):
-    # Chia dữ liệu thành 2 tập train_val và test 
+
     X_train_val, X_test, y_train_val, y_test = train_test_split(
     X, y, test_size = test_ratio, random_state = 42,shuffle=False)
 
-    # Tiếp theo, chia tập train_val thành 2 tập train và validation set 
     X_train, X_val, y_train, y_val = train_test_split(
     X_train_val, y_train_val, test_size = val_ratio, random_state = 42,shuffle=False)
 
@@ -114,14 +110,13 @@ def train_and_evaluate(X_train, y_train, X_val, y_val,input_dim,output_dim,
     else:
         raise ValueError(f"Không tìm thấy mô hình: {model_chose}")
 
-    # Early stopping để tránh overfitting
+    # Early stopping
     early_stopping = EarlyStopping(
         monitor='val_loss',
         patience=10,
         restore_best_weights=True
     )
-    
-    # Checkpoint để lưu model tốt nhất
+
     checkpoint = ModelCheckpoint(
         'best_model.keras',
         monitor='val_loss',
@@ -129,7 +124,6 @@ def train_and_evaluate(X_train, y_train, X_val, y_val,input_dim,output_dim,
         mode='min'
     )
     
-    # Train model và lưu history
     history = model.fit(
         X_train, y_train, 
         epochs=epochs, 
@@ -139,7 +133,6 @@ def train_and_evaluate(X_train, y_train, X_val, y_val,input_dim,output_dim,
         shuffle=False,
         callbacks=[early_stopping, checkpoint]
     )
-
     if return_history:
         return model, history
     return model
@@ -160,11 +153,9 @@ def train_sequential_additive(X_train, y_train, X_val, y_val,input_dim,output_di
         return_history=True
     )
     
-    # Lấy dự đoán từ model1 (y)
     train_pred1 = model1.predict(X_train)
     val_pred1 = model1.predict(X_val)
-    
-    # Tính residuals với scale phù hợp
+
     train_residuals = y_train - train_pred1
     val_residuals = y_val - val_pred1
     
@@ -179,7 +170,6 @@ def train_sequential_additive(X_train, y_train, X_val, y_val,input_dim,output_di
         learning_rate=learning_rate, 
         return_history=True
     )
-    
     return model1, model2, history1, history2
 
 def train_sequential_multi(X_train, y_train, X_val, y_val,input_dim,output_dim,
@@ -198,11 +188,9 @@ def train_sequential_multi(X_train, y_train, X_val, y_val,input_dim,output_dim,
         return_history=True
     )
     
-    # Lấy dự đoán từ model1 (y)
     train_pred1 = model1.predict(X_train)
     val_pred1 = model1.predict(X_val)
     
-    # Tính residuals với scale phù hợp
     train_residuals = y_train / train_pred1
     val_residuals = y_val / val_pred1
     
@@ -217,7 +205,6 @@ def train_sequential_multi(X_train, y_train, X_val, y_val,input_dim,output_dim,
         learning_rate=learning_rate, 
         return_history=True
     )
-    
     return model1, model2, history1, history2
 
 def rescale_data(test_predicted, actual_test):
@@ -284,7 +271,6 @@ def predict(model,X_test,y_test):
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close()
-
     return predictions,actual_test, mae, mse, rmse, cv_rmse, buf
 
 def combine_predictions_add(predictions_1, predictions_2, y_test):
@@ -296,19 +282,7 @@ def combine_predictions_add(predictions_1, predictions_2, y_test):
     cv_rmse = calculate_cvrmse(y_test, final_predictions)
     
     # Vẽ biểu đồ so sánh giá trị thực và dự đoán cuối cùng
-    plt.figure(figsize=(12, 6))
-    plt.plot(y_test, label="Giá trị thực")
-    plt.plot(final_predictions, label="Dự đoán ")
-    plt.xlabel("Thời gian")
-    plt.ylabel("Giá trị")
-    plt.title("Biểu đồ dự đoán - Mô hình Tuần Tự Cộng")
-    plt.legend()
-    
-    # Lưu biểu đồ vào buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close()
+    buf = plot_final_prediction(y_test, final_predictions, title="Biểu đồ Dự đoán - Mô hình Tuần Tự Cộng")
     
     return final_predictions,mae, mse, rmse, cv_rmse, buf
 
@@ -321,69 +295,62 @@ def combine_predictions_mul(predictions_1, predictions_2, y_test):
     cv_rmse = calculate_cvrmse(y_test, final_predictions)
     
     # Vẽ biểu đồ so sánh giá trị thực và dự đoán cuối cùng
-    plt.figure(figsize=(12, 6))
-    plt.plot(y_test, label="Giá trị thực")
-    plt.plot(final_predictions, label="Dự đoán ")
-    plt.xlabel("Thời gian")
-    plt.ylabel("Giá trị")
-    plt.title("Biểu đồ Dự đoán  - Mô hình Tuần Tự Nhân")
-    plt.legend()
-    
-    # Lưu biểu đồ vào buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close()
+    buf = plot_final_prediction(y_test, final_predictions, title="Biểu đồ Dự đoán - Mô hình Tuần Tự Nhân")
     
     return final_predictions,mae, mse, rmse, cv_rmse, buf
 
-def combine_predictions_parallel(predictions_1, predictions_2, actual_test, input_dim, output_dim):
-
-    omega,omega2 = calculate_square_deviation(actual_test,predictions_1,predictions_2)
+def combine_predictions_parallel(predictions_1, predictions_2, y_test, input_dim, output_dim):
+    omega, omega2 = calculate_square_deviation (y_test,predictions_1,predictions_2)
     print("gia tri omega:", omega)
     print("gia tri omega 2:", omega2)
     final_predict = omega * predictions_1 + omega2 * predictions_2
 
-    prediction_1_final = omega*predictions_1
-    prediction_2_final = omega2*predictions_2
+    # prediction_1_final = omega*predictions_1
+    # prediction_2_final = omega2*predictions_2
 
-    mae = mean_absolute_error(actual_test, final_predict)
-    mse = mean_squared_error(actual_test, final_predict)
-    rmse = calculate_rmse(actual_test, final_predict)
-    cv_rmse = calculate_cvrmse(actual_test, final_predict)
+    mae = mean_absolute_error(y_test, final_predict)
+    mse = mean_squared_error(y_test, final_predict)
+    rmse = calculate_rmse(y_test, final_predict)
+    cv_rmse = calculate_cvrmse(y_test, final_predict)
     
-    mae1 = mean_absolute_error(actual_test, prediction_1_final)
-    mse1 = mean_squared_error(actual_test, prediction_1_final)
-    rmse1 = calculate_rmse(actual_test, prediction_1_final)
-    cv_rmse1 = calculate_cvrmse(actual_test, prediction_1_final)
-    
-    print(f'Giá trị của mae, mse, rmse, cv_rmse cho mô hình 1 là: {mae1:.6f}, {mse1:.6f}, {rmse1:.6f}, {cv_rmse1:.6f}')
-    mae2 = mean_absolute_error(actual_test, prediction_2_final)
-    mse2 = mean_squared_error(actual_test, prediction_2_final)
-    rmse2 = calculate_rmse(actual_test, prediction_2_final)
-    cv_rmse2 = calculate_cvrmse(actual_test, prediction_2_final)
-
-    print(f'Giá trị của mae, mse, rmse, cv_rmse cho mô hình 2 là: {mae2:.6f}, {mse2:.6f}, {rmse2:.6f}, {cv_rmse2:.6f}')
+    buf = plot_final_prediction(y_test, final_predict, title="Biểu đồ Dự đoán - Mô hình Song Song")
     
     # Vẽ biểu đồ so sánh giá trị thực và dự đoán cuối cùng
+    # print("Actual Test:", actual_test[:input_dim])  # In 10 giá trị đầu tiên
+    # print("Final Predict:", final_predict[:output_dim])
+    # print("Predictions 1:", predictions_1[:output_dim])
+    # print("Predictions 2:", predictions_2[:output_dim]) 
+    return final_predict,mae, mse, rmse, cv_rmse, buf
+def plot_predictions(actual, predicted, title="Actual vs Predicted Values"):
     plt.figure(figsize=(12, 6))
-    plt.plot(actual_test, label="Giá trị thực")
-    plt.plot(final_predict, label="Dự đoán ")
+    if predicted.shape[1] == 1:
+        plt.plot(actual, label='Actual')
+        plt.plot(predicted, label='Predicted')
+    else:
+        plt.plot(actual, label='Actual')
+        for i in range(predicted.shape[1]):
+            plt.plot(predicted[:, i], label=f'Predicted {i+1}')
+    plt.legend()
+    plt.title(title)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+def plot_final_prediction(y_true, y_pred, title):
+    plt.figure(figsize=(12, 6))
+    plt.plot(y_true, label="Giá trị thực")
+    plt.plot(y_pred, label="Dự đoán")
     plt.xlabel("Thời gian")
     plt.ylabel("Giá trị")
-    plt.title("Biểu đồ Dự đoán Cuối Cùng - Mô hình Tuần Song song")
+    plt.title(title)
     plt.legend()
-    
-    # Lưu biểu đồ vào buffer
     buf = io.BytesIO()
     plt.savefig(buf, format="png")
     buf.seek(0)
     plt.close()
-    print("Actual Test:", actual_test[:input_dim])  # In 10 giá trị đầu tiên
-    print("Final Predict:", final_predict[:output_dim])
-    print("Predictions 1:", predictions_1[:output_dim])
-    print("Predictions 2:", predictions_2[:output_dim]) 
-    return final_predict,mae, mse, rmse, cv_rmse, buf
+    return buf
 
 def LSTM_Model(input_dim, output_dim, units=32, learning_rate=0.0001, activation='relu'):
     model = Sequential()
@@ -398,8 +365,6 @@ def CNN_Model(input_dim, output_dim, units=32, learning_rate=0.0001, activation=
     model.add(Conv1D(filters=units, input_shape=(input_dim, 1), kernel_size=3, strides=1, padding='same', activation=activation)) 
     model.add(Conv1D(filters=units, kernel_size=3, strides=1, padding='same', activation=activation)) 
     model.add(MaxPooling1D(pool_size=2, strides=2, padding='same')) 
-    # # model.add(Flatten()) 
-    # model.add(Reshape((-1,)))
     model.add(GlobalAveragePooling1D())
     model.add(Dense(64, activation=activation)) 
     model.add(Dense(output_dim)) 
