@@ -24,3 +24,8 @@ pip install -r requirements.txt
 ```
 ## Sample Visualization
 ![image](https://github.com/user-attachments/assets/c0c3e92d-343e-494a-a4f9-6a9fc5464a3a)
+## Comparison Results 
+## 📚 References
+- TensorFlow Time Series Tutorial.
+- Hands-On Time Series Forecasting with Python.
+- Academic papers on CNN-LSTM and hybrid models.
