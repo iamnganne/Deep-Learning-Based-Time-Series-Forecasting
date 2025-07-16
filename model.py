@@ -48,7 +48,7 @@ def get_data(data,input_dim, output_dim,target_column=None):
         data = data.sort_values(by=[date_column], ascending=True)
         data.set_index(date_column, inplace=True)
 
-            # Xử lý dữ liệu số
+        #Numerical data
         numeric_columns = data.select_dtypes(include=[np.number]).columns
         for column in numeric_columns:
             data[column] = pd.to_numeric(data[column].astype(str).str.replace(',', ''), errors='coerce')
@@ -60,14 +60,14 @@ def get_data(data,input_dim, output_dim,target_column=None):
         X_value = data[[target_column]]
         y_value = data[[target_column]]
             
-            # missing values
+        # missing values
         X_value = X_value.fillna(method='ffill').fillna(method='bfill')
         y_value = y_value.fillna(method='ffill').fillna(method='bfill')
             
-            # Chuẩn hóa dữ liệu
+        # normailize data
         X_scale_dataset, y_scale_dataset = normalize_data(X_value, y_value)
             
-            # Tạo chuỗi thời gian
+        # create time series data
         X, y = get_X_y(X_scale_dataset, y_scale_dataset, input_dim, output_dim)
         print(f"X shape: {X.shape}, y shape: {y.shape}") 
         return X,y  
